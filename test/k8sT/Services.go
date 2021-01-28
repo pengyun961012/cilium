@@ -1368,18 +1368,25 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 			failBind("::ffff:127.0.0.1", data.Spec.Ports[1].NodePort, "udp", k8s1NodeName)
 		}
 
-		testNodePortExternal := func(checkTCP, checkUDP bool) {
+		testNodePortExternal := func(checkTCP, checkUDP bool, nodeIPv4 string, nodeIPv6 string) {
 			var (
 				data                v1.Service
 				nodePortService     = "test-nodeport"
 				nodePortServiceIPv6 = "test-nodeport-ipv6"
 			)
 
+			if nodeIPv4 == "" {
+				nodeIPv4 = k8s1IP
+			}
+			if nodeIPv6 == "" {
+				nodeIPv6 = primaryK8s1IPv6
+			}
+
 			services := map[string]string{
-				nodePortService: k8s1IP,
+				nodePortService: nodeIPv4,
 			}
 			if helpers.DualStackSupported() {
-				services[nodePortServiceIPv6] = primaryK8s1IPv6
+				services[nodePortServiceIPv6] = nodeIPv6
 			}
 
 			for svcName, nodeIP := range services {
@@ -2167,6 +2174,69 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 					enableBackgroundReport = true
 				})
 
+				Context("Tests with Wireguard (L2-less)", func() {
+					It("Tests NodePort", func() {
+						var data v1.Service
+						err := kubectl.Get(helpers.DefaultNamespace, "service test-nodeport").Unmarshal(&data)
+						Expect(err).Should(BeNil(), "Cannot retrieve service")
+
+						// kube-wireguarder will setup wireguard tunnels and patch CiliumNode
+						// objects so that wg IP addrs will be used for pod direct routing
+						// routes.
+						wgYAML := helpers.ManifestGet(kubectl.BasePath(), "kube-wireguarder.yaml")
+						res := kubectl.ApplyDefault(wgYAML)
+						Expect(res).Should(helpers.CMDSuccess(), "unable to apply %s", wgYAML)
+						defer func() {
+							// First delete DS, as otherwise the cleanup routine executed upon
+							// SIGTERM won't have access to k8s {Cilium,}Node objects.
+							kubectl.DeleteResource("pod", "-n "+helpers.KubeSystemNamespace+" -l app=kube-wireguarder --wait=true")
+
+							kubectl.Delete(wgYAML)
+						}()
+						err = kubectl.WaitforPods(helpers.KubeSystemNamespace, "-l app=kube-wireguarder", time.Duration(60*time.Second))
+						Expect(err).Should(BeNil())
+
+						DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+							"devices":                      fmt.Sprintf(`'{%s,%s}'`, privateIface, "wg0"),
+							"nodePort.directRoutingDevice": "wg0",
+							"tunnel":                       "disabled",
+							"autoDirectNodeRoutes":         "true",
+							"bpf.hostRouting":              "true",
+						})
+
+						// Test via k8s1 private iface
+						url := getHTTPLink(k8s1IP, data.Spec.Ports[0].NodePort)
+						testCurlFromOutside(url, 10, false)
+						// Test via k8s1 wg0 iface
+						wgK8s1IPv4 := getIPv4AddrForIface(k8s1NodeName, "wg0")
+						url = getHTTPLink(wgK8s1IPv4, data.Spec.Ports[0].NodePort)
+						testCurlFromOutside(url, 10, false)
+
+						// Disable setting direct routes via kube-wireguarder, as non-wg device
+						// is going to be used for direct routing.
+						res = kubectl.Patch(helpers.KubeSystemNamespace, "configmap", "kube-wireguarder-config",
+							`{"data":{"setup-direct-routes": "false"}}`)
+						res.ExpectSuccess("Failed to patch kube-wireguarder-config")
+						res = kubectl.DeleteResource("pod", "-n "+helpers.KubeSystemNamespace+" -l app=kube-wireguarder --wait=true")
+						res.ExpectSuccess("Failed to delete kube-wireguarder DS")
+
+						DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
+							"devices":                      fmt.Sprintf(`'{%s,%s}'`, privateIface, "wg0"),
+							"nodePort.directRoutingDevice": privateIface,
+							"tunnel":                       "disabled",
+							"autoDirectNodeRoutes":         "true",
+							"bpf.hostRouting":              "true",
+						})
+
+						// Test via k8s1 private iface
+						url = getHTTPLink(k8s1IP, data.Spec.Ports[0].NodePort)
+						testCurlFromOutside(url, 10, false)
+						// Test via k8s1 wg0 iface
+						url = getHTTPLink(wgK8s1IPv4, data.Spec.Ports[0].NodePort)
+						testCurlFromOutside(url, 10, false)
+					})
+				})
+
 				Context("Tests with vxlan", func() {
 					It("Tests NodePort", func() {
 						testNodePort(true, false, helpers.ExistNodeWithoutCilium(), 0)
@@ -2560,7 +2630,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 						"autoDirectNodeRoutes":      "true",
 						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
 					})
-					testNodePortExternal(false, false)
+					testNodePortExternal(false, false, "", "")
 				})
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, SNAT and Maglev", func() {
@@ -2576,7 +2646,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 						// see #14047 for details.
 						"hostFirewall": "false",
 					})
-					testNodePortExternal(false, false)
+					testNodePortExternal(false, false, "", "")
 				})
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, Hybrid and Random", func() {
@@ -2588,7 +2658,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 						"autoDirectNodeRoutes":      "true",
 						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
 					})
-					testNodePortExternal(true, false)
+					testNodePortExternal(true, false, "", "")
 				})
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, Hybrid and Maglev", func() {
@@ -2604,7 +2674,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 						// see #14047 for details.
 						"hostFirewall": "false",
 					})
-					testNodePortExternal(true, false)
+					testNodePortExternal(true, false, "", "")
 				})
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, DSR and Random", func() {
@@ -2616,7 +2686,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 						"autoDirectNodeRoutes":      "true",
 						"devices":                   fmt.Sprintf(`'{%s}'`, privateIface),
 					})
-					testNodePortExternal(true, true)
+					testNodePortExternal(true, true, "", "")
 				})
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with XDP, direct routing, DSR and Maglev", func() {
@@ -2632,7 +2702,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 						// see #14047 for details.
 						"hostFirewall": "false",
 					})
-					testNodePortExternal(true, true)
+					testNodePortExternal(true, true, "", "")
 				})
 
 				SkipItIf(helpers.DoesNotExistNodeWithoutCilium, "Tests with TC, direct routing and Hybrid", func() {
@@ -2644,7 +2714,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 						"autoDirectNodeRoutes":      "true",
 						"devices":                   fmt.Sprintf(`'{}'`), // Revert back to auto-detection after XDP.
 					})
-					testNodePortExternal(true, false)
+					testNodePortExternal(true, false, "", "")
 				})
 			})
 
