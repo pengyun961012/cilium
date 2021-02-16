@@ -747,6 +747,7 @@ setupiptables
 sfc
 sg
 sha
+shorthands
 sidecarImageRegex
 sig
 skb
