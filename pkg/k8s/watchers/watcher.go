@@ -572,15 +572,19 @@ func genCartesianProduct(
 	}
 
 	svcs := make([]loadbalancer.SVC, 0, svcSize)
+	feFamilyIPv6 := utils.IsIPv6(fe)
 
 	for fePortName, fePort := range ports {
 		var besValues []loadbalancer.Backend
 		for ip, backend := range bes.Backends {
-			if backendPort := backend.Ports[string(fePortName)]; backendPort != nil {
+			parsedIP := net.ParseIP(ip)
+
+			if backendPort := backend.Ports[string(fePortName)]; backendPort != nil && feFamilyIPv6 == utils.IsIPv6(parsedIP) {
 				besValues = append(besValues, loadbalancer.Backend{
 					NodeName: backend.NodeName,
 					L3n4Addr: loadbalancer.L3n4Addr{
-						IP: net.ParseIP(ip), L4Addr: *backendPort,
+						IP:     parsedIP,
+						L4Addr: *backendPort,
 					},
 				})
 			}
