@@ -2190,10 +2190,10 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, helpers.DualStackSupp
 							// First delete DS, as otherwise the cleanup routine executed upon
 							// SIGTERM won't have access to k8s {Cilium,}Node objects.
 							kubectl.DeleteResource("pod", "-n "+helpers.KubeSystemNamespace+" -l app=kube-wireguarder --wait=true")
-
+							kubectl.WaitTerminatingPodsInNsWithFilter(helpers.KubeSystemNamespace, "-l app=kube-wireguarder", helpers.HelperTimeout)
 							kubectl.Delete(wgYAML)
 						}()
-						err = kubectl.WaitforPods(helpers.KubeSystemNamespace, "-l app=kube-wireguarder", time.Duration(60*time.Second))
+						err = kubectl.WaitforPods(helpers.KubeSystemNamespace, "-l app=kube-wireguarder", time.Duration(240*time.Second))
 						Expect(err).Should(BeNil())
 
 						DeployCiliumOptionsAndDNS(kubectl, ciliumFilename, map[string]string{
